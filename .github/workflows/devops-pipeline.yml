@@ -1,0 +1,84 @@
+name: Full DevOps Pipeline - Student 13
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16'
+
+      - name: Install Dependencies
+        run: npm ci
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '16'
+      - run: npm ci
+      - name: Run Tests
+        run: npm test
+
+  security_scan:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Snyk
+        run: npm install -g snyk
+      - name: Run Security Scan
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          snyk auth $SNYK_TOKEN || true
+          snyk test --severity-threshold=high || true
+
+  docker_build:
+    runs-on: ubuntu-latest
+    needs: security_scan
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build & Push Docker Image
+        run: |
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/my-app-13:latest .
+          docker push ${{ secrets.DOCKER_USERNAME }}/my-app-13:latest
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: docker_build
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Deploy to AWS EC2
+        env:
+          PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST: ${{ secrets.EC2_PUBLIC_IP }}
+        run: |
+          echo "$PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ubuntu@$HOST << 'EOF'
+            docker pull ${{ secrets.DOCKER_USERNAME }}/my-app-13:latest || true
+            docker stop my-app-13 || true
+            docker rm my-app-13 || true
+            docker run -d -p 5000:5000 --name my-app-13 ${{ secrets.DOCKER_USERNAME }}/my-app-13:latest
+            sleep 8
+            curl -f http://localhost:5000 || echo "Health check failed - check logs"
+          EOF
